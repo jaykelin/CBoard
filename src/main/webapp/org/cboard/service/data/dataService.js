@@ -56,6 +56,8 @@ cBoard.service('dataService', function ($http, updateService) {
             reload: reload
         }).success(function (response) {
             callback(response);
+        }).error(function (data) {
+            callback(null);
         });
     };
 
@@ -117,22 +119,13 @@ cBoard.service('dataService', function ($http, updateService) {
                 return [{
                     name: config.col,
                     aggregate: config.aggregate_type
-                }]
+                }];
                 break;
         }
     };
 
     var getExpSeries = function (exp) {
-        var result = [];
-        exp = exp.trim();
-        _.each(exp.match(/(sum|avg|count|max|min)\([\u4e00-\u9fa5_a-zA-Z0-9]+\)/g), function (text) {
-            var name = text.substring(text.indexOf('(') + 1, text.indexOf(')'));
-            result.push({
-                name: name,
-                aggregate: text.substring(0, text.indexOf('('))
-            });
-        });
-        return result;
+        return parserExp(exp).aggs;
     };
 
     var filter = function (cfg, iv) {
@@ -450,14 +443,10 @@ cBoard.service('dataService', function ($http, updateService) {
     };
 
     var compileExp = function (exp) {
-        exp = exp.trim();
-        _.each(exp.match(/(sum|avg|count|max|min)\([\u4e00-\u9fa5_a-zA-Z0-9]+\)/g), function (text) {
-            var name = text.substring(text.indexOf('(') + 1, text.indexOf(')'));
-            var aggregate = text.substring(0, text.indexOf('('));
-            exp = exp.replace(text, "groupData['" + name + "']['" + aggregate + "'][key]");
-        });
+        var parseredExp = parserExp(exp);
         return function (groupData, key) {
-            return eval(exp);
+            var _names = parseredExp.names;
+            return eval(parseredExp.evalExp);
         };
     };
 
@@ -531,4 +520,31 @@ cBoard.service('dataService', function ($http, updateService) {
         return arr;
     };
 
+    function parserExp(rawExp) {
+        var evalExp = rawExp;
+        var _temp = [];
+        var aggs = [];
+        evalExp = evalExp.trim().replace(/[\n]/g, '');
+
+        _.each(evalExp.match(/".*?"/g), function (qutaText) {
+            evalExp = evalExp.replace(qutaText, '_#' + _temp.length);
+            _temp.push(qutaText);
+        });
+
+        var names = []; // expression text in aggreagtion function, could be a columnName or script
+        _.each(evalExp.match(/(sum|avg|count|max|min)\("?.*?"?\)/g), function (aggUnit) {
+            var aggregate = aggUnit.substring(0, aggUnit.indexOf('('));
+            var name = aggUnit.substring(aggUnit.indexOf('(') + 1, aggUnit.indexOf(')'));
+            if (name.match("_#")) {
+                name = _temp[name.replace("_#", "")].replace(/\"/g, "");
+            }
+            evalExp = evalExp.replace(aggUnit, "groupData[_names[" + names.length + "]]['" + aggregate + "'][key]");
+            names.push(name);
+            aggs.push({
+                name: name,
+                aggregate: aggregate
+            });
+        });
+        return {evalExp: evalExp, aggs: aggs, names: names};
+    }
 });

@@ -4,7 +4,8 @@ import com.alibaba.fastjson.JSONObject;
 import com.google.common.base.Charsets;
 import com.google.common.hash.Hashing;
 import com.googlecode.aviator.AviatorEvaluator;
-import org.cboard.dataprovider.aggregator.Aggregator;
+import org.cboard.dataprovider.aggregator.Aggregatable;
+import org.cboard.dataprovider.aggregator.InnerAggregator;
 import org.cboard.dataprovider.annotation.DatasourceParameter;
 import org.cboard.dataprovider.config.AggConfig;
 import org.cboard.dataprovider.config.DimensionConfig;
@@ -12,7 +13,6 @@ import org.cboard.dataprovider.expression.NowFunction;
 import org.cboard.dataprovider.result.AggregateResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.Map;
 import java.util.function.Consumer;
@@ -23,10 +23,9 @@ import java.util.stream.Collectors;
  */
 public abstract class DataProvider {
 
-    @Autowired
-    private Aggregator aggregator;
-    private Map<String, String> dataSource;
-    private Map<String, String> query;
+    private InnerAggregator innerAggregator;
+    protected Map<String, String> dataSource;
+    protected Map<String, String> query;
     private int resultLimit;
     private long interval = 12 * 60 * 60; // second
 
@@ -49,20 +48,20 @@ public abstract class DataProvider {
      *
      * @return
      */
-    public AggregateResult getAggData(AggConfig ac, boolean reload) throws Exception {
+    public final AggregateResult getAggData(AggConfig ac, boolean reload) throws Exception {
         evalValueExpression(ac);
-        if (this instanceof AggregateProvider && isAggregateProviderActive()) {
-            return ((AggregateProvider) this).queryAggData(dataSource, query, ac);
+        if (this instanceof Aggregatable && isAggregateProviderActive()) {
+            return ((Aggregatable) this).queryAggData(ac);
         } else {
             checkAndLoad(reload);
-            return aggregator.queryAggData(dataSource, query, ac);
+            return innerAggregator.queryAggData(ac);
         }
     }
 
-    public String viewAggDataQuery(AggConfig config) throws Exception {
+    public final String getViewAggDataQuery(AggConfig config) throws Exception {
         evalValueExpression(config);
-        if (this instanceof AggregateProvider && isAggregateProviderActive()) {
-            return ((AggregateProvider) this).viewAggDataQuery(dataSource, query, config);
+        if (this instanceof Aggregatable && isAggregateProviderActive()) {
+            return ((Aggregatable) this).viewAggDataQuery(config);
         } else {
             return "Not Support";
         }
@@ -74,25 +73,25 @@ public abstract class DataProvider {
      * @param columnName
      * @return
      */
-    public String[][] getDimVals(String columnName, AggConfig config, boolean reload) throws Exception {
+    public final String[][] getDimVals(String columnName, AggConfig config, boolean reload) throws Exception {
         String[][] dimVals = null;
         evalValueExpression(config);
-        if (this instanceof AggregateProvider && isAggregateProviderActive()) {
-            dimVals = ((AggregateProvider) this).queryDimVals(dataSource, query, columnName, config);
+        if (this instanceof Aggregatable && isAggregateProviderActive()) {
+            dimVals = ((Aggregatable) this).queryDimVals(columnName, config);
         } else {
             checkAndLoad(reload);
-            dimVals = aggregator.queryDimVals(dataSource, query, columnName, config);
+            dimVals = innerAggregator.queryDimVals(columnName, config);
         }
         return dimVals;
     }
 
-    public String[] getColumn(boolean reload) throws Exception {
+    public final String[] getColumn(boolean reload) throws Exception {
         String[] columns = null;
-        if (this instanceof AggregateProvider && isAggregateProviderActive()) {
-            columns = ((AggregateProvider) this).getColumn(dataSource, query);
+        if (this instanceof Aggregatable && isAggregateProviderActive()) {
+            columns = ((Aggregatable) this).getColumn();
         } else {
             checkAndLoad(reload);
-            columns = aggregator.getColumn(dataSource, query);
+            columns = innerAggregator.getColumn();
         }
         return columns;
     }
@@ -100,9 +99,9 @@ public abstract class DataProvider {
     private void checkAndLoad(boolean reload) throws Exception {
         String key = getLockKey(dataSource, query);
         synchronized (key.intern()) {
-            if (reload || !aggregator.checkExist(dataSource, query)) {
-                String[][] data = getData(dataSource, query);
-                aggregator.loadData(dataSource, query, data, interval);
+            if (reload || !innerAggregator.checkExist()) {
+                String[][] data = getData();
+                innerAggregator.loadData(data, interval);
                 logger.info("loadData {}", key);
             }
         }
@@ -130,7 +129,7 @@ public abstract class DataProvider {
         return Hashing.md5().newHasher().putString(JSONObject.toJSON(dataSource).toString() + JSONObject.toJSON(query).toString(), Charsets.UTF_8).hash().toString();
     }
 
-    abstract public String[][] getData(Map<String, String> dataSource, Map<String, String> query) throws Exception;
+    abstract public String[][] getData() throws Exception;
 
     public void setDataSource(Map<String, String> dataSource) {
         this.dataSource = dataSource;
@@ -150,6 +149,10 @@ public abstract class DataProvider {
 
     public void setInterval(long interval) {
         this.interval = interval;
+    }
+
+    public void setInnerAggregator(InnerAggregator innerAggregator) {
+        this.innerAggregator = innerAggregator;
     }
 
 }

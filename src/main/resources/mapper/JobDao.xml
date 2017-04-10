@@ -39,7 +39,7 @@
     </select>
 
     <select id="getJobList" resultType="org.cboard.pojo.DashboardJob">
-        SELECT
+       SELECT
                j.job_id         AS id,
                j.user_id        AS userId,
                j.job_name       AS name,
@@ -77,4 +77,9 @@
         UPDATE dashboard_job SET job_status = #{1},exec_log = #{2} WHERE job_id = #{0}
         ]]>
     </update>
+
+    <select id="checkJobRole" resultType="java.lang.Long">
+        SELECT count(1) FROM dashboard_job WHERE job_id = #{1}
+        and (#{0} = '${admin_user_id}' OR user_id = #{0} OR job_id IN (SELECT res_id FROM dashboard_user_role ur LEFT JOIN dashboard_role_res rr ON ur.role_id = rr.role_id WHERE ur.user_id = #{0} AND rr.res_type = 'job' AND rr.permission LIKE #{2}))
+    </select>
 </mapper>

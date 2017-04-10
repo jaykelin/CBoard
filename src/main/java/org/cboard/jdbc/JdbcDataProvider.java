@@ -1,5 +1,6 @@
 package org.cboard.jdbc;
 
+import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.druid.pool.DruidDataSourceFactory;
 import com.alibaba.fastjson.JSONObject;
 import com.google.common.base.Charsets;
@@ -8,7 +9,7 @@ import org.apache.commons.collections.map.HashedMap;
 import org.apache.commons.lang.StringUtils;
 import org.cboard.cache.CacheManager;
 import org.cboard.cache.HeapCacheManager;
-import org.cboard.dataprovider.AggregateProvider;
+import org.cboard.dataprovider.aggregator.Aggregatable;
 import org.cboard.dataprovider.DataProvider;
 import org.cboard.dataprovider.annotation.DatasourceParameter;
 import org.cboard.dataprovider.annotation.ProviderName;
@@ -28,6 +29,7 @@ import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -37,7 +39,7 @@ import java.util.stream.Stream;
  * Created by yfyuan on 2016/8/17.
  */
 @ProviderName(name = "jdbc")
-public class JdbcDataProvider extends DataProvider implements AggregateProvider {
+public class JdbcDataProvider extends DataProvider implements Aggregatable {
 
     private static final Logger LOG = LoggerFactory.getLogger(JdbcDataProvider.class);
 
@@ -70,14 +72,15 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
         return Hashing.md5().newHasher().putString(JSONObject.toJSON(dataSource).toString() + JSONObject.toJSON(query).toString(), Charsets.UTF_8).hash().toString();
     }
 
-    public String[][] getData(Map<String, String> dataSource, Map<String, String> query) throws Exception {
+    @Override
+    public String[][] getData() throws Exception {
 
         LOG.debug("Execute JdbcDataProvider.getData() Start!");
-        String sql = query.get(SQL);
+        String sql = getAsSubQuery(query.get(SQL));
         List<String[]> list = null;
         LOG.info("SQL String: " + sql);
 
-        try (Connection con = getConnection(dataSource)) {
+        try (Connection con = getConnection()) {
             Statement ps = con.createStatement();
             ResultSet rs = ps.executeQuery(sql);
             ResultSetMetaData metaData = rs.getMetaData();
@@ -121,9 +124,12 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
         return deletedBlankLine.endsWith(";") ? deletedBlankLine.substring(0, deletedBlankLine.length() - 1) : deletedBlankLine;
     }
 
-    private Connection getConnection(Map<String, String> dataSource) throws Exception {
-        String v = dataSource.get(POOLED);
-        if (v != null && "true".equals(v)) {
+    private Connection getConnection() throws Exception {
+        String usePool = dataSource.get(POOLED);
+        String username = dataSource.get(USERNAME);
+        String password = dataSource.get(PASSWORD);
+        Connection conn = null;
+        if (usePool != null && "true".equals(usePool)) {
             String key = Hashing.md5().newHasher().putString(JSONObject.toJSON(dataSource).toString(), Charsets.UTF_8).hash().toString();
             DataSource ds = datasourceMap.get(key);
             if (ds == null) {
@@ -134,29 +140,41 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
                         conf.put(DruidDataSourceFactory.PROP_DRIVERCLASSNAME, dataSource.get(DRIVER));
                         conf.put(DruidDataSourceFactory.PROP_URL, dataSource.get(JDBC_URL));
                         conf.put(DruidDataSourceFactory.PROP_USERNAME, dataSource.get(USERNAME));
-                        conf.put(DruidDataSourceFactory.PROP_PASSWORD, dataSource.get(PASSWORD));
+                        if (StringUtils.isNotBlank(password)) {
+                            conf.put(DruidDataSourceFactory.PROP_PASSWORD, dataSource.get(PASSWORD));
+                        }
                         conf.put(DruidDataSourceFactory.PROP_INITIALSIZE, "3");
-                        ds = DruidDataSourceFactory.createDataSource(conf);
-                        datasourceMap.put(key, ds);
+                        DruidDataSource druidDS = (DruidDataSource) DruidDataSourceFactory.createDataSource(conf);
+                        druidDS.setBreakAfterAcquireFailure(true);
+                        druidDS.setConnectionErrorRetryAttempts(5);
+                        datasourceMap.put(key, druidDS);
                     }
                 }
             }
-            return ds.getConnection();
+            try {
+                conn = ds.getConnection();
+            } catch (SQLException e) {
+                e.printStackTrace();
+                datasourceMap.remove(key);
+                throw e;
+            }
+            return conn;
         } else {
             String driver = dataSource.get(DRIVER);
             String jdbcurl = dataSource.get(JDBC_URL);
-            String username = dataSource.get(USERNAME);
-            String password = dataSource.get(PASSWORD);
+
             Class.forName(driver);
             Properties props = new Properties();
             props.setProperty("user", username);
-            props.setProperty("password", password);
+            if (StringUtils.isNotBlank(password)) {
+                props.setProperty("password", password);
+            }
             return DriverManager.getConnection(jdbcurl, props);
         }
     }
 
     @Override
-    public String[][] queryDimVals(Map<String, String> dataSource, Map<String, String> query, String columnName, AggConfig config) throws Exception {
+    public String[][] queryDimVals(String columnName, AggConfig config) throws Exception {
         String fsql = null;
         String exec = null;
         String sql = getAsSubQuery(query.get(SQL));
@@ -167,13 +185,13 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
             Stream<DimensionConfig> r = config.getRows().stream();
             Stream<DimensionConfig> f = config.getFilters().stream();
             Stream<DimensionConfig> filters = Stream.concat(Stream.concat(c, r), f);
-            Map<String, Integer> types = getColumnType(dataSource, query);
+            Map<String, Integer> types = getColumnType();
             Stream<DimensionConfigHelper> filterHelpers = filters.map(fe -> new DimensionConfigHelper(fe, types.get(fe.getColumnName())));
             String whereStr = assembleSqlFilter(filterHelpers, "WHERE");
             fsql = "SELECT __view__.%s FROM (%s) __view__ %s GROUP BY __view__.%s";
             exec = String.format(fsql, columnName, sql, whereStr, columnName);
             LOG.info(exec);
-            try (Connection connection = getConnection(dataSource);
+            try (Connection connection = getConnection();
                  Statement stat = connection.createStatement();
                  ResultSet rs = stat.executeQuery(exec)) {
                 while (rs.next()) {
@@ -187,7 +205,7 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
         fsql = "SELECT __view__.%s FROM (%s) __view__ GROUP BY __view__.%s";
         exec = String.format(fsql, columnName, sql, columnName);
         LOG.info(exec);
-        try (Connection connection = getConnection(dataSource);
+        try (Connection connection = getConnection();
              Statement stat = connection.createStatement();
              ResultSet rs = stat.executeQuery(exec)) {
             while (rs.next()) {
@@ -264,10 +282,10 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
         return where.toString();
     }
 
-    private String assembleAggValColumns(Stream<ValueConfig> selectStream) {
+    private String assembleAggValColumns(Stream<ValueConfig> selectStream, Map<String, Integer> types) {
         StringJoiner columns = new StringJoiner(", ", "", " ");
         columns.setEmptyValue("");
-        selectStream.map(toSelect).filter(e -> e != null).forEach(columns::add);
+        selectStream.map(m -> toSelect.apply(m, types)).filter(e -> e != null).forEach(columns::add);
         return columns.toString();
     }
 
@@ -294,7 +312,7 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
         return metaData;
     }
 
-    private Map<String, Integer> getColumnType(Map<String, String> dataSource, Map<String, String> query) throws Exception {
+    private Map<String, Integer> getColumnType() throws Exception {
         Map<String, Integer> result = null;
         String key = getKey(dataSource, query);
         String subQuerySql = getAsSubQuery(query.get(SQL));
@@ -303,7 +321,7 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
             return result;
         } else {
             try (
-                    Connection connection = getConnection(dataSource);
+                    Connection connection = getConnection();
                     Statement stat = connection.createStatement()
             ) {
                 ResultSetMetaData metaData = getMetaData(subQuerySql, stat);
@@ -319,10 +337,10 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
     }
 
     @Override
-    public String[] getColumn(Map<String, String> dataSource, Map<String, String> query) throws Exception {
+    public String[] getColumn() throws Exception {
         String subQuerySql = getAsSubQuery(query.get(SQL));
         try (
-                Connection connection = getConnection(dataSource);
+                Connection connection = getConnection();
                 Statement stat = connection.createStatement()
         ) {
             ResultSetMetaData metaData = getMetaData(subQuerySql, stat);
@@ -336,12 +354,12 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
     }
 
     @Override
-    public AggregateResult queryAggData(Map<String, String> dataSource, Map<String, String> query, AggConfig config) throws Exception {
-        String exec = getQueryAggDataSql(dataSource, query, config);
+    public AggregateResult queryAggData(AggConfig config) throws Exception {
+        String exec = getQueryAggDataSql(config);
         List<String[]> list = new LinkedList<>();
         LOG.info(exec);
         try (
-                Connection connection = getConnection(dataSource);
+                Connection connection = getConnection();
                 Statement stat = connection.createStatement();
                 ResultSet rs = stat.executeQuery(exec)
         ) {
@@ -368,17 +386,17 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
         return new AggregateResult(dimensionList, result);
     }
 
-    private String getQueryAggDataSql(Map<String, String> dataSource, Map<String, String> query, AggConfig config) throws Exception {
+    private String getQueryAggDataSql(AggConfig config) throws Exception {
         Stream<DimensionConfig> c = config.getColumns().stream();
         Stream<DimensionConfig> r = config.getRows().stream();
         Stream<DimensionConfig> f = config.getFilters().stream();
         Stream<DimensionConfig> filters = Stream.concat(Stream.concat(c, r), f);
-        Map<String, Integer> types = getColumnType(dataSource, query);
+        Map<String, Integer> types = getColumnType();
         Stream<DimensionConfigHelper> predicates = filters.map(fe -> new DimensionConfigHelper(fe, types.get(fe.getColumnName())));
         Stream<DimensionConfig> dimStream = Stream.concat(config.getColumns().stream(), config.getRows().stream());
 
         String dimColsStr = assembleDimColumns(dimStream);
-        String aggColsStr = assembleAggValColumns(config.getValues().stream());
+        String aggColsStr = assembleAggValColumns(config.getValues().stream(), types);
         String whereStr = assembleSqlFilter(predicates, "WHERE");
         String groupByStr = StringUtils.isBlank(dimColsStr) ? "" : "GROUP BY " + dimColsStr;
 
@@ -397,22 +415,31 @@ public class JdbcDataProvider extends DataProvider implements AggregateProvider 
     }
 
     @Override
-    public String viewAggDataQuery(Map<String, String> dataSource, Map<String, String> query, AggConfig config) throws Exception {
-        return getQueryAggDataSql(dataSource, query, config);
+    public String viewAggDataQuery(AggConfig config) throws Exception {
+        return getQueryAggDataSql(config);
     }
 
-    private Function<ValueConfig, String> toSelect = (config) -> {
+    private BiFunction<ValueConfig, Map<String, Integer>, String> toSelect = (config, types) -> {
+        String aggExp;
+        if (config.getColumn().contains(" ")) {
+            aggExp = config.getColumn();
+            for (String column : types.keySet()) {
+                aggExp = aggExp.replaceAll(" " + column + " ", " __view__." + column + " ");
+            }
+        } else {
+            aggExp = "__view__." + config.getColumn();
+        }
         switch (config.getAggType()) {
             case "sum":
-                return "SUM(__view__." + config.getColumn() + ") AS sum_" + config.getColumn();
+                return "SUM(" + aggExp + ")";
             case "avg":
-                return "AVG(__view__." + config.getColumn() + ") AS avg_" + config.getColumn();
+                return "AVG(" + aggExp + ")";
             case "max":
-                return "MAX(__view__." + config.getColumn() + ") AS max_" + config.getColumn();
+                return "MAX(" + aggExp + ")";
             case "min":
-                return "MIN(__view__." + config.getColumn() + ") AS min_" + config.getColumn();
+                return "MIN(" + aggExp + ")";
             default:
-                return "COUNT(__view__." + config.getColumn() + ") AS count_" + config.getColumn();
+                return "COUNT(" + aggExp + ")";
         }
     };
 
