@@ -9,7 +9,7 @@
             <bean id="redisTemplate" class="org.springframework.data.redis.core.RedisTemplate">
                 <property name="connectionFactory">
                     <bean class="org.springframework.data.redis.connection.jedis.JedisConnectionFactory"
-                          p:hostName="127.0.0.1"
+                          p:hostName="10.1.168.35"
                           p:port="6379" p:usePool="true"/>
                 </property>
                 <property name="keySerializer">
