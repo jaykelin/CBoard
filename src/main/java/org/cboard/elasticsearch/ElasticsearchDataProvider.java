@@ -63,11 +63,17 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
     private static final JSONPath jsonPath_value = JSONPath.compile("$..value");
 
     @Override
+    public boolean doAggregationInDataSource() {
+        return true;
+    }
+
+    @Override
     public String[][] queryDimVals(String columnName, AggConfig config) throws Exception {
         JSONObject request = new JSONObject();
         request.put("size", 0);
+        request.put("query", buildFilterDSL(config));
         request.put("aggregations", getTermsAggregation(columnName));
-        JSONObject response = post(getSearchUrl(), request);
+        JSONObject response = post(getSearchUrl(request), request);
         String[] nofilter = response.getJSONObject("aggregations").getJSONObject(columnName).getJSONArray("buckets").stream()
                 .map(e -> ((JSONObject) e).getString("key")).toArray(String[]::new);
         if (config != null) {
@@ -76,7 +82,7 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
                 request.put("query", new JSONObject());
                 request.getJSONObject("query").put("bool", new JSONObject());
                 request.getJSONObject("query").getJSONObject("bool").put("filter", getFilter(config));
-                response = post(getSearchUrl(), request);
+                response = post(getSearchUrl(request), request);
                 String[] filtered = response.getJSONObject("aggregations").getJSONObject(columnName).getJSONArray("buckets").stream()
                         .map(e -> ((JSONObject) e).getString("key")).toArray(String[]::new);
                 return new String[][]{filtered, nofilter};
@@ -211,12 +217,13 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
         return String.format("http://%s/%s/_mapping/%s", dataSource.get(SERVERIP), query.get(INDEX), query.get(TYPE));
     }
 
-    protected String getSearchUrl() {
-        return String.format("http://%s/%s/_search", dataSource.get(SERVERIP), query.get(INDEX));
+    protected String getSearchUrl(JSONObject request) {
+        return String.format("http://%s/%s/%s/_search", dataSource.get(SERVERIP), query.get(INDEX), query.get(TYPE));
     }
 
     @Override
     public String[] getColumn() throws Exception {
+        typesCache.remove(getKey());
         Map<String, String> types = getTypes();
         return types.keySet().toArray(new String[0]);
     }
@@ -243,7 +250,7 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
     public AggregateResult queryAggData(AggConfig config) throws Exception {
         LOG.info("queryAggData");
         JSONObject request = getQueryAggDataRequest(config);
-        JSONObject response = post(getSearchUrl(), request);
+        JSONObject response = post(getSearchUrl(request), request);
         Stream<DimensionConfig> dimStream = Stream.concat(config.getColumns().stream(), config.getRows().stream());
         List<ColumnIndex> dimensionList = dimStream.map(ColumnIndex::fromDimensionConfig).collect(Collectors.toList());
         List<ColumnIndex> valueList = config.getValues().stream().map(ColumnIndex::fromValueConfig).collect(Collectors.toList());
@@ -272,11 +279,16 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
             pre.getJSONObject(key).put("aggregations", termAggregations.get(i));
         }
         request.put("size", 0);
-        request.put("query", new JSONObject());
-        request.getJSONObject("query").put("bool", new JSONObject());
-        request.getJSONObject("query").getJSONObject("bool").put("filter", getFilter(config));
+        request.put("query", buildFilterDSL(config));
         request.put("aggregations", termAggregations.get(0));
         return request;
+    }
+
+    public JSONObject buildFilterDSL(AggConfig config) {
+        JSONObject filter = new JSONObject();
+        filter.put("bool", new JSONObject());
+        filter.getJSONObject("bool").put("filter", getFilter(config));
+        return filter;
     }
 
     private void getAggregationResponse(JSONObject object, List<String[]> result, List<String> parentKeys, int dimensionLevel, List<ColumnIndex> dimensionList, List<ColumnIndex> valueList) {
@@ -326,6 +338,9 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
                 case "min":
                     type = "min";
                     break;
+                case "distinct":
+                    type = "cardinality";
+                    break;
                 default:
                     type = "value_count";
                     break;
@@ -368,25 +383,49 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
     }
 
     private void getField(Map<String, String> types, Map.Entry<String, Object> field, String parent) {
-        JSONObject value = (JSONObject) field.getValue();
-        if (value.keySet().contains("properties")) {
-            for (Map.Entry e : value.getJSONObject("properties").entrySet()) {
-                getField(types, e, field.getKey());
+        JSONObject property = (JSONObject) field.getValue();
+        if (property.keySet().contains("properties")) {
+            for (Map.Entry e : property.getJSONObject("properties").entrySet()) {
+                String key = field.getKey();
+                if (parent != null) {
+                    key = parent + "." + field.getKey();
+                }
+                getField(types, e, key);
             }
         } else {
+            String key = null;
+            String type = property.getString("type");
             if (parent == null) {
-                types.put(field.getKey(), value.getString("type"));
+                key = field.getKey();
             } else {
-                types.put(parent + "." + field.getKey(), value.getString("type"));
+                key = parent + "." + field.getKey();
             }
+            if (isTextWithoutKeywordField(property)) {
+                return;
+            }
+            if (isTextWithKeywordField(property)) {
+                key += ".keyword";
+            }
+            types.put(key, type);
         }
+    }
+
+    private boolean isTextWithKeywordField(JSONObject property) {
+        String type = property.getString("type");
+        return "text".equals(type) && JSONPath.containsValue(property, "$.fields..type", "keyword");
+    }
+
+    private boolean isTextWithoutKeywordField(JSONObject property) {
+        String type = property.getString("type");
+        return "text".equals(type) && !JSONPath.containsValue(property, "$.fields..type", "keyword");
     }
 
     @Override
     public String viewAggDataQuery(AggConfig ac) throws Exception {
         String format = "curl -XPOST '%s?pretty' -d '\n%s'";
-        String dsl = JSON.toJSONString(getQueryAggDataRequest(ac), true);
-        return String.format(format, getSearchUrl(), dsl);
+        JSONObject request = getQueryAggDataRequest(ac);
+        String dsl = JSON.toJSONString(request, true);
+        return String.format(format, getSearchUrl(request), dsl);
     }
 
 
@@ -396,4 +435,5 @@ public class ElasticsearchDataProvider extends DataProvider implements Aggregata
             overrideAggregations = JSONObject.parseObject(query.get(OVERRIDE));
         }
     }
+
 }
