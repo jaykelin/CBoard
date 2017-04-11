@@ -15,6 +15,7 @@
         <mybatisspring.version>1.1.1</mybatisspring.version>
         <jackson.version>1.9.10</jackson.version>
         <jdk.version>1.8</jdk.version>
+        <presto.version>0.161</presto.version>
     </properties>
     <dependencies>
         <dependency>
@@ -163,7 +164,7 @@
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>fastjson</artifactId>
-            <version>1.1.41</version>
+            <version>1.2.29</version>
         </dependency>
         <dependency>
             <groupId>com.microsoft.sqlserver</groupId>
@@ -287,7 +288,21 @@
         <dependency>
             <groupId>ru.yandex.clickhouse</groupId>
             <artifactId>clickhouse-jdbc</artifactId>
-            <version>0.1.17</version>
+            <version>0.1.19</version>
+        </dependency>
+
+        <!-- Presto JDBC Start -->
+        <dependency>
+            <groupId>com.facebook.presto</groupId>
+            <artifactId>presto-jdbc</artifactId>
+            <version>${presto.version}</version>
+        </dependency>
+        <!-- Presto JDBC End -->
+
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>fluent-hc</artifactId>
+            <version>4.5.3</version>
         </dependency>
     </dependencies>
 
